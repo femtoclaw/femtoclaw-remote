@@ -1,6 +1,6 @@
 //! WebSocket Handler.
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -13,9 +13,7 @@ impl WebSocket {
         Self { tx }
     }
 
-    pub async fn handle(&self, stream: impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>) {
-        let mut stream = stream;
-        
+    pub async fn handle(&self, mut stream: impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin) {
         while let Some(msg) = stream.next().await {
             if let Ok(Message::Text(text)) = msg {
                 tracing::debug!("WebSocket received: {}", text);
