@@ -2,7 +2,6 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
@@ -10,16 +9,23 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::types::ToolCall;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
-    pub messages: Vec<crate::types::Message>,
+    pub messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub message: Option<String>,
-    pub tool_call: Option<crate::types::ToolCall>,
+    pub tool_call: Option<ToolCall>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,28 +71,28 @@ async fn health_check() -> &'static str {
 }
 
 async fn handle_chat(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(request): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, StatusCode> {
+) -> Json<ChatResponse> {
     tracing::debug!("Chat request: {:?}", request);
     
-    let response = ChatResponse {
-        message: Some("Echo: ".to_string()),
-        tool_call: None,
-    };
+    let input = request.messages.last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
 
-    Ok(Json(response))
+    Json(ChatResponse {
+        message: Some(format!("Echo: {}", input)),
+        tool_call: None,
+    })
 }
 
 async fn handle_tool(
     State(_state): State<AppState>,
     Json(request): Json<ToolRequest>,
-) -> Result<Json<ToolResponse>, StatusCode> {
+) -> Json<ToolResponse> {
     tracing::debug!("Tool request: {:?}", request);
     
-    let response = ToolResponse {
+    Json(ToolResponse {
         result: format!("Executed {} with args: {:?}", request.tool, request.args),
-    };
-
-    Ok(Json(response))
+    })
 }
