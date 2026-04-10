@@ -1,12 +1,27 @@
 //! HTTP Server.
 
 use axum::{
-    extract::State,
-    response::Json,
+    extract::{State, WebSocketUpgrade},
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
+use axum::extract::ws::{self, WebSocket};
+
+/// Build the Axum router with given state. Used for testing.
+pub fn build_app(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(health_check))
+        .route("/health", get(health_check))
+        .route("/v1/chat", post(handle_chat))
+        .route("/v1/tools/execute", post(handle_tool))
+        .route("/v1/ws", get(handle_websocket))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
 
 use crate::state::AppState;
 use crate::types::ToolCall;
@@ -48,12 +63,19 @@ impl Server {
         Self { port }
     }
 
-    pub async fn run(&self, state: AppState) -> anyhow::Result<()> {
+    pub async fn run(&self, mut state: AppState) -> anyhow::Result<()> {
+        // Initialize the agent if not already done.
+        if state.get_agent().is_none() {
+            state.init_agent().await?;
+        }
+
         let app = Router::new()
             .route("/", get(health_check))
             .route("/health", get(health_check))
             .route("/v1/chat", post(handle_chat))
             .route("/v1/tools/execute", post(handle_tool))
+            .route("/v1/ws", get(handle_websocket))
+            .layer(CorsLayer::permissive())
             .with_state(state);
 
         let addr = format!("0.0.0.0:{}", self.port);
@@ -71,7 +93,7 @@ async fn health_check() -> &'static str {
 }
 
 async fn handle_chat(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
     tracing::debug!("Chat request: {:?}", request);
@@ -80,19 +102,128 @@ async fn handle_chat(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    Json(ChatResponse {
-        message: Some(format!("Echo: {}", input)),
-        tool_call: None,
-    })
+    match state.get_agent() {
+        Some(agent) => {
+            match agent.run(&input).await {
+                Ok(reply) => Json(ChatResponse {
+                    message: Some(reply),
+                    tool_call: None,
+                }),
+                Err(e) => {
+                    tracing::error!("Agent error: {}", e);
+                    Json(ChatResponse {
+                        message: Some(format!("Agent error: {}", e)),
+                        tool_call: None,
+                    })
+                }
+            }
+        }
+        None => Json(ChatResponse {
+            message: Some("Agent not initialized".to_string()),
+            tool_call: None,
+        })
+    }
 }
 
 async fn handle_tool(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<ToolRequest>,
 ) -> Json<ToolResponse> {
     tracing::debug!("Tool request: {:?}", request);
     
-    Json(ToolResponse {
-        result: format!("Executed {} with args: {:?}", request.tool, request.args),
+    match state.get_agent() {
+        Some(agent) => {
+            match agent.execute_tool(&request.tool, request.args.clone()).await {
+                Ok(result) => Json(ToolResponse { result }),
+                Err(e) => {
+                    tracing::error!("Tool error: {}", e);
+                    Json(ToolResponse { result: format!("Error: {}", e) })
+                }
+            }
+        }
+        None => Json(ToolResponse { result: "Agent not initialized".to_string() }),
+    }
+}
+
+async fn handle_websocket(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket: WebSocket| async move {
+        let (mut sender, mut receiver) = socket.split();
+        let agent_opt = state.get_agent();
+
+        while let Some(Ok(msg)) = receiver.next().await {
+            if let ws::Message::Text(text) = msg {
+                tracing::debug!("WebSocket received: {}", text);
+                let response = if let Some(agent) = &agent_opt {
+                    match agent.run(&text).await {
+                        Ok(reply) => reply,
+                        Err(e) => format!("Error: {}", e),
+                    }
+                } else {
+                    "Agent not initialized".to_string()
+                };
+
+                if let Err(e) = sender.send(ws::Message::Text(response.into())).await {
+                    tracing::error!("WebSocket send error: {}", e);
+                    break;
+                }
+            }
+        }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let response = health_check().await;
+        assert_eq!(response, "FemtoClaw OK");
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_echo() {
+        let mut state = AppState::new();
+        state.init_agent().await.unwrap();
+        let request = ChatRequest {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "ping".to_string(),
+            }],
+        };
+        let response = handle_chat(axum::extract::State(state), Json(request)).await;
+        assert!(response.message.is_some());
+        let msg = response.message.clone().unwrap();
+        assert!(msg.contains("ACK: ping"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tool_shell() {
+        let mut state = AppState::new();
+        state.init_agent().await.unwrap();
+        let request = ToolRequest {
+            tool: "shell".to_string(),
+            args: json!({"bin":"echo","argv":["hello"]}),
+        };
+        let response = handle_tool(axum::extract::State(state), Json(request)).await;
+        assert!(response.result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tool_unknown_denied() {
+        let mut state = AppState::new();
+        state.init_agent().await.unwrap();
+        let request = ToolRequest {
+            tool: "unknown".to_string(),
+            args: json!({}),
+        };
+        let response = handle_tool(axum::extract::State(state), Json(request)).await;
+        assert!(response.result.contains("denied") || response.result.contains("Capability denied"));
+    }
+
+    // WebSocket test would require a real WebSocket connection; deferred.
 }
