@@ -18,6 +18,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/health", get(health_check))
         .route("/v1/chat", post(handle_chat))
         .route("/v1/tools/execute", post(handle_tool))
+        .route("/v1/cluster/sync", post(handle_cluster_sync))
         .route("/v1/ws", get(handle_websocket))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -63,17 +64,19 @@ impl Server {
         Self { port }
     }
 
-    pub async fn run(&self, mut state: AppState) -> anyhow::Result<()> {
+    pub async fn run(&self, state: AppState) -> anyhow::Result<()> {
         // Initialize the agent if not already done.
-        if state.get_agent().is_none() {
+        if state.get_agent().await.is_none() {
             state.init_agent().await?;
         }
+        state.init_cluster().await;
 
         let app = Router::new()
             .route("/", get(health_check))
             .route("/health", get(health_check))
             .route("/v1/chat", post(handle_chat))
             .route("/v1/tools/execute", post(handle_tool))
+            .route("/v1/cluster/sync", post(handle_cluster_sync))
             .route("/v1/ws", get(handle_websocket))
             .layer(CorsLayer::permissive())
             .with_state(state);
@@ -86,6 +89,18 @@ impl Server {
 
         Ok(())
     }
+}
+
+async fn handle_cluster_sync(
+    State(state): State<AppState>,
+    Json(messages): Json<Vec<ChatMessage>>,
+) -> &'static str {
+    let internal_messages = messages.into_iter().map(|m| crate::state::Message {
+        role: m.role,
+        content: m.content,
+    }).collect();
+    state.sync_from_remote(internal_messages).await;
+    "OK"
 }
 
 async fn health_check() -> &'static str {
@@ -187,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_chat_echo() {
-        let mut state = AppState::new();
+        let state = AppState::new("test-node".to_string());
         state.init_agent().await.unwrap();
         let request = ChatRequest {
             messages: vec![ChatMessage {
@@ -203,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tool_shell() {
-        let mut state = AppState::new();
+        let state = AppState::new("test-node".to_string());
         state.init_agent().await.unwrap();
         let request = ToolRequest {
             tool: "shell".to_string(),
@@ -215,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tool_unknown_denied() {
-        let mut state = AppState::new();
+        let state = AppState::new("test-node".to_string());
         state.init_agent().await.unwrap();
         let request = ToolRequest {
             tool: "unknown".to_string(),
