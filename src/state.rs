@@ -61,7 +61,7 @@ impl AppState {
 
     pub async fn init_cluster(&self) {
         let mut cluster_lock = self.cluster.write().await;
-        *cluster_lock = Some(ClusterManager::new(self_id.clone(), self.clone()));
+        *cluster_lock = Some(ClusterManager::new(self.self_id.clone(), self.clone()));
     }
 
     pub async fn get_agent(&self) -> Option<Arc<Agent>> {

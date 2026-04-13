@@ -117,13 +117,25 @@ async fn handle_chat(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    match state.get_agent() {
+    match state.get_agent().await {
         Some(agent) => {
             match agent.run(&input).await {
-                Ok(reply) => Json(ChatResponse {
-                    message: Some(reply),
-                    tool_call: None,
-                }),
+                Ok(reply) => {
+                    // Record message in app state (broadcasts to cluster)
+                    state.add_message(crate::state::Message {
+                        role: "user".to_string(),
+                        content: input,
+                    }).await;
+                    state.add_message(crate::state::Message {
+                        role: "assistant".to_string(),
+                        content: reply.clone(),
+                    }).await;
+
+                    Json(ChatResponse {
+                        message: Some(reply),
+                        tool_call: None,
+                    })
+                },
                 Err(e) => {
                     tracing::error!("Agent error: {}", e);
                     Json(ChatResponse {
@@ -146,7 +158,7 @@ async fn handle_tool(
 ) -> Json<ToolResponse> {
     tracing::debug!("Tool request: {:?}", request);
     
-    match state.get_agent() {
+    match state.get_agent().await {
         Some(agent) => {
             match agent.execute_tool(&request.tool, request.args.clone()).await {
                 Ok(result) => Json(ToolResponse { result }),
@@ -166,14 +178,23 @@ async fn handle_websocket(
 ) -> impl IntoResponse {
     ws.on_upgrade(|socket: WebSocket| async move {
         let (mut sender, mut receiver) = socket.split();
-        let agent_opt = state.get_agent();
 
         while let Some(Ok(msg)) = receiver.next().await {
             if let ws::Message::Text(text) = msg {
                 tracing::debug!("WebSocket received: {}", text);
-                let response = if let Some(agent) = &agent_opt {
+                let response = if let Some(agent) = state.get_agent().await {
                     match agent.run(&text).await {
-                        Ok(reply) => reply,
+                        Ok(reply) => {
+                            state.add_message(crate::state::Message {
+                                role: "user".to_string(),
+                                content: text.to_string(),
+                            }).await;
+                            state.add_message(crate::state::Message {
+                                role: "assistant".to_string(),
+                                content: reply.clone(),
+                            }).await;
+                            reply
+                        },
                         Err(e) => format!("Error: {}", e),
                     }
                 } else {

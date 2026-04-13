@@ -39,7 +39,7 @@ impl ClusterManager {
     }
 
     pub async fn add_peer(&self, node: ClusterNode) {
-        if node.id == self_id { return; }
+        if node.id == self.self_id { return; }
         self.peers.write().await.insert(node.id.clone(), node);
     }
 
