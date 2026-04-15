@@ -1,155 +1,62 @@
-# FemtoClaw Remote
+# 🌐 FemtoClaw Remote & Clustering
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Status](https://img.shields.io/badge/Status-Stable-green.svg)]()
+[![Tier](https://img.shields.io/badge/Tier-Reference-blue.svg)]()
 
-FemtoClaw Remote Protocol — API server, event handlers, and WebSocket support.
+The **FemtoClaw Remote** library provides the network and coordination layer required for distributed agent clusters. It implements the **Distributed Runtime Model (Spec 41)**, enabling multi-node state synchronization, high availability, and remote API access.
 
-## Overview
+---
 
-`femtoclaw-remote` provides the network layer for remote access to FemtoClaw runtime. It exposes the FemtoClaw agent via HTTP and WebSocket APIs.
+## 📡 Distributed State Synchronization
 
-This enables distributed deployments and integration with web applications.
+FemtoClaw nodes in a cluster use a high-efficiency synchronization protocol to ensure that all execution history and short-term memory (STM) remain consistent across instances.
 
-## Features
+- **Gossip-style Sync**: Every execution event (ToolCall, Result, Message) is broadcast to all healthy peers in the cluster.
+- **Remote Reconciliation**: Inbound synchronization events update the local agent's memory, allowing a node to resume a task started by a peer.
+- **Contextual Consistency**: Ensures that "Brain" inference always has access to the most recent global execution history, regardless of which node executed the previous step.
 
-- **HTTP API Server**: RESTful endpoints for agent interaction
-- **WebSocket Support**: Real-time bidirectional communication
-- **Request Handling**: Structured request/response handling
-- **CORS Support**: Cross-origin resource sharing
-- **Tracing**: Request tracing and logging
+---
 
-## Installation
+## 🔌 Industrial API Endpoints
 
-```toml
-[dependencies]
-femtoclaw-remote = "1.0"
-```
-
-## Usage
-
-```rust
-use femtoclaw_remote::Server;
-
-let server = Server::new(8080);
-server.run().await?;
-```
-
-## API Endpoints
+The remote server provides a standardized interface for interacting with autonomous agent loops.
 
 ### REST API
-
-```
-GET  /              — Health check
-POST /v1/chat       — Send chat message
-POST /v1/tools/execute — Execute capability
-```
+- `POST /v1/chat`: Send a prompt to the autonomous agent loop. The agent will iterate until a final response is generated or limits are reached.
+- `POST /v1/tools/execute`: Direct, low-level execution of a system capability (authorized only).
+- `POST /v1/cluster/sync`: Internal endpoint for inbound state updates from cluster peers.
 
 ### WebSocket
+- `GET /v1/ws`: An interactive, bidirectional tunnel for real-time agent sessions. Ideal for terminal-based integrations and streaming responses.
 
-```
-WS  /v1/ws         — Real-time bidirectional messaging
-```
+---
 
-## Message Format
+## 🚀 Cluster Usage
 
-### Chat Request
+```rust
+use femtoclaw_remote::{Server, AppState};
 
-```json
-{
-  "messages": [
-    { "role": "user", "content": "Hello" }
-  ]
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 1. Initialize application state with a unique node ID
+    let state = AppState::new("industrial-node-01".to_string());
+    
+    // 2. Initialize the agent and cluster management
+    state.init_agent().await?;
+    state.init_cluster().await;
+
+    // 3. Launch the API server on the standard port
+    let server = Server::new(8080);
+    server.run(state).await?;
+
+    Ok(())
 }
 ```
 
-### Chat Response
+---
 
-```json
-{
-  "message": { "content": "Hello! How can I help?" },
-  "tool_call": null
-}
-```
+## 📄 Related Specifications
+- **[FC-DIST-0001: Distributed Runtime Model](../femtoclaw-spec/41-FemtoClaw_Distributed_Runtime_Model_Specification.md)**
+- **[FC-DEPLOY-0001: Deployment Specification](../femtoclaw-spec/FC-DEPLOY-0001-FemtoClaw_Deployment_and_Operational_Environment_Specification.md)**
 
-### Tool Execution Request
-
-```json
-{
-  "tool": "filesystem.read",
-  "args": { "path": "/etc/hosts" }
-}
-```
-
-### Tool Execution Response
-
-```json
-{
-  "result": "127.0.0.1 localhost"
-}
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    External Clients                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Web App  │  │   CLI       │  │   SDK       │         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
-└─────────┼────────────────┼────────────────┼─────────────────┘
-          │                │                │
-          ▼                ▼                ▼
-┌─────────────────────────────────────────────────────────────┐
-│              femtoclaw-remote                               │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────┐        │
-│  │   Axum    │  │  WebSocket │  │    Handler     │        │
-│  │  Server   │  │   Handler  │  │                │        │
-│  └─────┬─────┘  └─────┬──────┘  └───────┬────────┘        │
-└────────┼──────────────┼─────────────────┼──────────────────┘
-         │              │                 │
-         ▼              ▼                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│              femtoclaw-core                                 │
-│  femtoclaw-protocol → femtoclaw-policy → femtoclaw         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Dependencies
-
-- femtoclaw
-- femtoclaw-protocol
-- femtoclaw-policy
-- femtoclaw-audit
-- axum 0.8
-- tokio 1.x (with rt-multi-thread, macros, net, sync, time)
-- tokio-tungstenite 0.24
-- futures-util 0.3
-- tower 0.5
-- tower-http 0.6 (with cors, trace)
-- serde 1.x
-- serde_json 1.x
-- tracing 0.1
-
-## Related Crates
-
-| Crate | Purpose |
-|-------|---------|
-| `femtoclaw-sdk` | Client library for remote access |
-| `femtoclaw-cli` | Interactive CLI |
-
-## Related Specifications
-
-- [FC-DEPLOY-0001: Deployment Specification](../femtoclaw-spec/FC-DEPLOY-0001-FemtoClaw_Deployment_and_Operational_Environment_Specification.md)
-- [FC-ABI-0001: Application Binary Interface](../femtoclaw-spec/FC-ABI-0001-Application_Binary_Interface_ABI_Specification.md)
-
-## License
-
-Copyright 2026 FemtoClaw
-
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+Copyright © 2026 FemtoClaw Project.
