@@ -3,11 +3,11 @@
 //! Handles peer discovery, authentication, and state synchronization across
 //! multiple FemtoClaw runtime nodes.
 
+use crate::state::AppState;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
-use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterNode {
@@ -39,7 +39,9 @@ impl ClusterManager {
     }
 
     pub async fn add_peer(&self, node: ClusterNode) {
-        if node.id == self.self_id { return; }
+        if node.id == self.self_id {
+            return;
+        }
         self.peers.write().await.insert(node.id.clone(), node);
     }
 
@@ -55,21 +57,25 @@ impl ClusterManager {
     pub async fn broadcast_sync(&self) -> anyhow::Result<()> {
         let peers = self.get_peers().await;
         let messages = self.app_state.get_messages().await;
-        
-        // This is a Reference Tier implementation: 
+
+        // This is a Reference Tier implementation:
         // Real-world clusters use consensus for strong consistency.
         // We implement a simple gossip-style broadcast for state sync.
-        
+
         let client = reqwest::Client::new();
-        
+        let api_key = self.app_state.api_key().await;
+
         for peer in peers {
-            if peer.status != NodeStatus::Healthy { continue; }
-            
+            if peer.status != NodeStatus::Healthy {
+                continue;
+            }
+
             let url = format!("{}/v1/cluster/sync", peer.address);
-            let _ = client.post(&url)
-                .json(&messages)
-                .send()
-                .await;
+            let mut request = client.post(&url).json(&messages);
+            if let Some(api_key) = &api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let _ = request.send().await;
         }
 
         Ok(())

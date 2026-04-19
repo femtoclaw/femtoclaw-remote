@@ -13,7 +13,11 @@ impl WebSocket {
         Self { tx }
     }
 
-    pub async fn handle(&self, mut stream: impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin) {
+    pub async fn handle(
+        &self,
+        mut stream: impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    ) {
         while let Some(msg) = stream.next().await {
             if let Ok(Message::Text(text)) = msg {
                 tracing::debug!("WebSocket received: {}", text);

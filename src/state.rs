@@ -1,13 +1,14 @@
 //! Application State.
 
+use axum::http::{header, HeaderMap};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::VecDeque;
-use serde::{Deserialize, Serialize};
 
-use femtoclaw::Agent;
-use femtoclaw::config::Config as CoreConfig;
 use crate::cluster::ClusterManager;
+use femtoclaw::config::Config as CoreConfig;
+use femtoclaw::Agent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -19,6 +20,9 @@ pub struct Message {
 pub struct Config {
     pub brain: String,
     pub max_history: usize,
+    pub bind_addr: String,
+    pub api_key: Option<String>,
+    pub max_sync_messages: usize,
 }
 
 impl Default for Config {
@@ -26,6 +30,13 @@ impl Default for Config {
         Self {
             brain: "echo".to_string(),
             max_history: 100,
+            bind_addr: std::env::var("FEMTO_BIND_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:3000".to_string()),
+            api_key: std::env::var("FEMTO_API_KEY").ok(),
+            max_sync_messages: std::env::var("FEMTO_MAX_SYNC_MESSAGES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
         }
     }
 }
@@ -68,15 +79,33 @@ impl AppState {
         self.agent.read().await.clone()
     }
 
+    pub async fn bind_addr(&self) -> String {
+        self.config.read().await.bind_addr.clone()
+    }
+
+    pub async fn api_key(&self) -> Option<String> {
+        self.config.read().await.api_key.clone()
+    }
+
+    pub async fn is_authorized(&self, headers: &HeaderMap) -> bool {
+        let expected = self.config.read().await.api_key.clone();
+        match expected {
+            None => true,
+            Some(expected) => extract_bearer_token(headers)
+                .map(|provided| provided == expected)
+                .unwrap_or(false),
+        }
+    }
+
     pub async fn add_message(&self, message: Message) {
         let mut messages = self.messages.write().await;
         let config = self.config.read().await;
-        
+
         if messages.len() >= config.max_history {
             messages.pop_front();
         }
         messages.push_back(message.clone());
-        
+
         // Broadcast sync to cluster
         let cluster_lock = self.cluster.read().await;
         if let Some(cluster) = &*cluster_lock {
@@ -91,26 +120,34 @@ impl AppState {
 
     pub async fn sync_from_remote(&self, remote_messages: Vec<Message>) {
         let mut messages = self.messages.write().await;
+        let max_messages = self.config.read().await.max_sync_messages;
+        let start = remote_messages.len().saturating_sub(max_messages);
         messages.clear();
-        for msg in remote_messages {
+        for msg in remote_messages.into_iter().skip(start) {
             messages.push_back(msg);
         }
-        
+
         // Update local agent if it exists
         let agent_lock = self.agent.read().await;
         if let Some(agent) = &*agent_lock {
-            let core_messages: Vec<femtoclaw::Message> = messages.iter().map(|m| {
-                match m.role.as_str() {
+            let core_messages: Vec<femtoclaw::Message> = messages
+                .iter()
+                .map(|m| match m.role.as_str() {
                     "user" => femtoclaw::Message::user(&m.content),
                     "assistant" => femtoclaw::Message::assistant(&m.content),
                     "system" => femtoclaw::Message::system(&m.content),
                     "tool" => femtoclaw::Message::tool(&m.content),
                     _ => femtoclaw::Message::assistant(&m.content),
-                }
-            }).collect();
+                })
+                .collect();
             agent.sync_memory(&core_messages).await;
         }
     }
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ")
 }
 
 impl Default for AppState {

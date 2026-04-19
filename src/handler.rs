@@ -24,7 +24,7 @@ impl Handler {
 
     pub async fn handle(&self, request: Request) -> Response {
         tracing::debug!("Handling request: {}", request.method);
-        
+
         Response {
             id: uuid::Uuid::new_v4().to_string(),
             result: Some(serde_json::json!({"status": "ok"})),
